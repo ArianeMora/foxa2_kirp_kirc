@@ -1,0 +1,305 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# DEseq2 notebook
+DEseq2 Analysis based on the tutorial provided by: https://bioconductor.org/packages/release/workflows/vignettes/rnaseqGene/inst/doc/rnaseqGene.html
+
+Data input: RNA-seq high throughput **un-normalised** count matrix. rows = genes and columns = experiments, thus counts[i][j] = counts[gene_i][experiment_j].
+
+The tutorial above describes getting from reads into count matrices however, I'm just going to start from the summarized data in a count matrix.
+
+## KIRC
+```{r}
+# If you need to install it:
+#BiocManager::install('DESeq2')
+library("DESeq2")
+library("stringr")
+library("tidyverse")
+
+# Here we'll set the project directory so that from now on we'll always have our files w.r.t. this dir.
+projectDir <- 'data/'
+fhlow <- 'low'
+fhcontrol <- 'normal'
+cancer <- 'kirc'
+
+" To test between different ones just change it here e.g. to test kirp or kirc"
+filename <- paste(projectDir, cancer, '_tumour_', fhcontrol, '_', fhlow, '_df.csv', sep='')
+
+# Read in the count matrix
+counts <- read.csv(filename, header = TRUE, sep = ",")
+
+# We want to rename the rows and make sure they are labeled by the gene_id (note you'll have to select whatever your ID column name is here)
+" Set <gene_id> to be the column with the gene IDs "
+rownames(counts) <- counts$id
+genes <- counts$id
+gene_names <- counts$external_gene_name
+# Note if we're testing for Fh-deficient differences between tumours, we don't want to include the healthy samples
+# So we filter out by selecting only the columns that contain Tumour
+
+# Let's make sure our count data is in matrix format and is only the numeric columns i.e. everything but the genes
+counts <- counts[,3:ncol(counts)]
+
+# Here we get the names of the columns, for my stuff I always have all the info in one string as I find it makes it easier
+# this means each of the "groups" are separated by a "_" this may be different for you
+sampleNames <- colnames(counts) # Sample names
+
+
+
+# For DEseq2 we need to turn this into a dataframe 
+sampleDF = read.csv(paste0('data/', cancer, '_', fhcontrol, '_', fhlow, '_sample_df.csv'), header = TRUE, sep = ",")
+
+condition_id <- as.factor(sampleDF$condition)
+# Make sure we don't include the ID in our columns
+countMatrix <- as.matrix(counts)
+
+# We now set the row names to be the gene IDs
+rownames(countMatrix) <- gene_names
+
+```
+
+## Starting the DEseq2 Analysis
+Now we can start to run the DEseq2 analysis or the EdgeR, both use the data in the above format.
+
+First we want to set the design for the experiment, from the above webpage: 
+
+>If the research aim is to determine for which genes the effect of treatment is different across groups, then interaction terms can be included and tested using a design such as ~ group + treatment + group:treatment.
+
+For us since we're looking at TCGA maybe we want to look at our treatment as sampleTypes e.g. "Tumour" vs "PrimaryTissueNormal" and our groups as gender e.g: "female", "male".  
+
+```{r}
+# Create a DEseq2 dataset from the counts using our count matrix note we need to set our colum data as factors
+gender = gender=sampleDF$Sex
+sample_df = data.frame(condition_id=condition_id, label=sampleDF$Label, fhStatus=sampleDF$FH_status, gender=sampleDF$Sex)
+ddsMat <- DESeqDataSetFromMatrix(countData = countMatrix,
+                                 colData = sample_df,
+                                 design = ~condition_id)
+
+```
+
+### Prefiltering data
+
+This step is one of the most important - here we decide how many of the rows to keep. Since I know the TCGA data has many samples, 
+I am going to be more strict and only keep genes that have > 5 counts in at least 10 samples. Something less stringent may be to just remove rows that have no counts.
+
+Note the more samples that are kept, the more statistical tests you need to perform, thus they will need to pass a higher FDR. It may be important here to filter many of the not so good genes if you wish to pick up on smaller changes such as transcription factors, or more variable genes such as cell cycle genes.
+
+
+```{r}
+"
+Here is the example of something you might do if you have only very few samples:
+
+keep <- rowSums(counts(dds)) > 1
+dds <- dds[keep,]
+"
+
+# Create a DEseq2 dataset from the counts using our 
+numSamplesMeetingCriteria <- 6
+numCountsInGene <- 10
+keep <- rowSums(counts(ddsMat) >= numCountsInGene) >= numSamplesMeetingCriteria
+dds <- ddsMat[keep,]
+
+# Let's print the number of rows
+nrow(dds)
+```
+
+
+### Normalising data for exploration
+
+While we don't need to normalise the data for performing differential expression, it is good to normalise it for visualisation, e.g. when we do a PCA. This is because PCA aims to maximise the captured variance which without normalisation will capture the genes with the highest counts. The tutorial recommends either *Variance stabilising transformation* (VST) (for medium to large datasets e.g. n > 30) or *rlog* (small datasets). These are preferred over just taking the *log transform* as in the log transform small count variances are over exemplified. I will just use VST since I have large datasets.
+
+```{r}
+# blind = FALSE means that the transform is not "unsupervised" it is made aware of the design we set earlier in the dds
+vsd <- vst(dds, blind = TRUE)
+
+```
+
+### Visualising of the data
+
+We'll perform two visualisations:
+
+    1) clustermap of the distance between samples
+    2) PCA of the samples
+
+For both of these we'll use the normalised data (by VST).
+
+#### Clustermap
+```{r}
+library("pheatmap")
+library("RColorBrewer")
+
+label <- paste0(cancer, ': ', fhlow, ' vs ', fhcontrol)
+# We calculate the euclidean distances between the samples. Note we need to transpose the matrix (t(assay(vsd))
+sampleDists <- dist(t(assay(vsd)))
+
+sampleDistMatrix <- as.matrix( sampleDists )
+# Create some row names
+rownames(sampleDistMatrix) <- paste( vsd$fhStatus, sep = " - " )
+# Set the column names to be empty since these are just the same as the row names
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+anno <- as.data.frame(colData(vsd)[, c("fhStatus")])
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         title=paste0("Distances between samples, ", label),
+         col = colors)
+```
+
+#### PCA
+```{r}
+
+pcaData <- plotPCA(vsd, intgroup = c( "fhStatus"), returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+ggplot(pcaData, aes(x = PC1, y = PC2, color = fhStatus, shape = gender)) +
+  geom_point(size =3) +
+  xlab(paste0("PC1: ", percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", percentVar[2], "% variance")) +
+  coord_fixed() +
+  ggtitle(paste0("PCA with VST data: ", label))
+
+```
+
+### Running DE analysis
+
+Now we'll actually run the DEseq analysis using what we designed before.
+
+#### Results columns explained
+
+> baseMean: average of the normalized count values, divided by the size factors, taken over all samples in the DESeqDataSet
+> log2FoldChange: effect size estimate e.g. how much a gene's expression has changed as a result of the treatment (or in our case tumour)
+> lfcSE: uncertainty (standard error estimate) for the log2FoldChange
+> pvalue: the likelihood that the effect observed occured by chance (e.g. by experimetal variability etc)
+
+
+Note:
+  1) alpha = p-value i.e. significance        --> usually 0.05 (will have high FDR)
+  2) padj = FDR adjusted p values (by BH)     --> usually 0.05 or 0.1
+  3) lfcThreshold = log fold change threshold --> usually 1.0
+  
+  
+```{r}
+
+# Run DEseq2
+dds <- DESeq(dds)
+
+# Build results table
+res <- results(dds)
+
+# Sumarise the results
+summary(res)
+
+# Lastly, we may want to see the results of the high logfoldchange e.g. > 1 with a padj value < 0.05
+res_padj05 <- results(dds, alpha = 0.05)
+res_padj05_lfcThreshold1 <- table(res_padj05$padj < 0.1)
+
+res_padj05_lfcThreshold1
+
+resLFC1 <- results(dds, lfcThreshold=1)
+table(resLFC1$padj < 0.1)
+```
+
+### Annotating and exporting results
+
+> This is the organism annotation package (“org”) for Homo sapiens (“Hs”), organized as an AnnotationDbi database package (“db”), using Entrez Gene IDs (“eg”) as primary key. To get a list of all available key types, use:
+
+
+```{r}
+# Order results by p-value
+resOrdered <- res[order(res$pvalue),]
+outputFilename <- paste(projectDir, 'DEseq2_', cancer, '_', fhcontrol, '_', fhlow, '.csv', sep='')
+write.csv(resOrdered, file = outputFilename)
+```
+
+### Visualise the significant results
+
+Couple of plots:
+
+    1) Volcano plot: https://www.bioconductor.org/packages/release/bioc/vignettes/EnhancedVolcano/inst/doc/EnhancedVolcano.html
+    2) Heatmaps https://www.rdocumentation.org/packages/pheatmap/versions/1.0.12/topics/pheatmap :
+            a) most significant genes
+            b) highest logFC genes (neg and pos)
+            c) most variable genes
+            
+```{r}
+#if (!requireNamespace('BiocManager', quietly = TRUE))
+#    install.packages('BiocManager')
+
+#BiocManager::install('EnhancedVolcano')
+library(EnhancedVolcano)
+
+
+# Let's make a volcano plot
+EnhancedVolcano(res,
+  lab = rownames(res),
+  x = 'log2FoldChange',
+  y = 'padj',
+  pCutoff=0.05,
+  selectLab=c('FH', 'FOXA2'),
+  title = label)
+
+```
+
+```{r}
+# Top genes as per variance
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+res$symbol <- rownames(res)
+mat  <- assay(vsd)[ topVarGenes, ]
+rownames(mat) <- res$symbol[topVarGenes]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("fhStatus", "gender")])  # ,"gender", "tumourStage"
+pheatmap(mat, annotation_col = anno, show_colnames = F, main="Top 20 most variable genes")
+
+```
+
+```{r}
+# Top genes as per significance
+topSig <- head(order(res$padj, decreasing = FALSE), 20)
+ids <- rownames(res[topSig,])
+mat  <- assay(vsd[ids])
+rownames(mat) <- res$symbol[topSig]
+anno <- as.data.frame(colData(vsd)[, c("fhStatus", "gender")]) # ,"gender", "tumourStage"
+pheatmap(mat, annotation_col = anno, show_colnames = F, main="Top 20 most significant genes")
+
+```
+
+```{r}
+# Top genes as per logFC
+sig <- na.omit(res)
+sig <- sig[sig$padj < 0.05, ]
+topSig <- head(order(sig$log2FoldChange, decreasing = FALSE), 20)
+ids <- rownames(sig[topSig,])
+mat  <- assay(vsd[ids])
+rownames(mat) <- sig$symbol[topSig]
+anno <- as.data.frame(colData(vsd)[, c("fhStatus","gender")])
+pheatmap(mat, annotation_col = anno, show_colnames = F, main="Top 20 genes with largest LogFC")
+
+```
+```{r}
+# Top genes as per logFC
+topSig <- head(order(sig$log2FoldChange, decreasing = TRUE), 20)
+ids <- rownames(sig[topSig,])
+mat  <- assay(vsd[ids])
+rownames(mat) <- sig$symbol[topSig]
+anno <- as.data.frame(colData(vsd)[, c("fhStatus","gender")])
+pheatmap(mat, annotation_col = anno, show_colnames = F, main="Top 20 genes with most negative LogFC")
+
+
+```
+
+```{r}
+# Look at some specific genes
+ids <- c( 'FOXF2', 'FH', 'FOXA1', 'FOXA2', 'MIR200CHG', 'CFTR') 
+mat  <- assay(vsd[ids])
+rownames(mat) <- ids #sig$symbol[topSig]
+anno <- as.data.frame(colData(vsd)[, c("fhStatus","gender")])
+pheatmap(mat, annotation_col = anno, show_colnames = F, main="Genes related to FOXA2")
+```
+
+### Print session info
+
+```{r}
+utils::sessionInfo()
+```
