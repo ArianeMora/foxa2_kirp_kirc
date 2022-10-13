@@ -5,6 +5,8 @@
 RNA count data were downloaded from TCGA (https://www.cancer.gov/about-nci/organization/ccg/research/structural-genomics/tcga)
 using scidat (https://github.com/ArianeMora/scidat) for patients with kidney cancers (rna_df.csv in data folder.)
 
+To access the data please see Zenodo: https://doi.org/10.5281/zenodo.7192554 and add the files to your computer.
+
 ## Processing
 
 The kidney cancer patient count data were split into KIRC and KIRP, and only the tumour data was used for this analysis, 
